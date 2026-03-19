@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cream: #F3F4F4;
+  --color-rose: #853953;
+  --color-plum: #612D53;
+  --color-charcoal: #2C2C2C;
+
+  --font-display: "DM Sans", "Helvetica Neue", sans-serif;
+  --font-body: "Source Serif 4", Georgia, serif;
+}
