@@ -4,7 +4,7 @@
   import { OrbitControls } from "@threlte/extras";
   import * as THREE from "three";
   import { onMount } from "svelte";
-  import coverUrl from "../assets/cover.png";
+  import coverTextureUrl from "../assets/book_cover.jpeg";
 
   // ── Book dimensions ──
   const W = 1.0;
@@ -15,10 +15,9 @@
   const PAGES_INSET = 0.03;
 
   // ── Colors ──
-  const COVER_COLOR = "#853953";
-  const SPINE_COLOR = "#6E2F48";
   const PAGE_COLOR = "#FFFEF5";
   const PAGE_EDGE_COLOR = "#FFEF5F";
+  const EDGE_COLOR = "#1a6b6b"; // Darker teal for cover edges — reduces flicker contrast
 
   // ── Text content ──
   const AUTHORS = "John Doe  ·  Van Dam  ·  Sam Alt";
@@ -28,24 +27,276 @@
   const TEX_W = 1024;
   const TEX_H = Math.round(TEX_W * (H / W));
 
-  // ── Reactive state ──
-  let frontTexture = $state(null);
-  let backTexture = $state(null);
+  // ── State ──
+  let coverTexture = $state(null);
+  let frontComposite = $state(null);
+  let backComposite = $state(null);
 
-  // ── Multi-material for front cover box (6 faces) ──
-  // BoxGeometry face order: +x, -x, +y, -y, +z (front), -z (back)
+  // ── Helper: wrap text returning final Y ──
+  function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+    const words = text.split(" ");
+    let line = "";
+    let curY = y;
+    for (const word of words) {
+      const test = line + word + " ";
+      if (ctx.measureText(test).width > maxWidth && line) {
+        ctx.fillText(line.trim(), x, curY);
+        line = word + " ";
+        curY += lineHeight;
+      } else {
+        line = test;
+      }
+    }
+    if (line.trim()) {
+      ctx.fillText(line.trim(), x, curY);
+      curY += lineHeight;
+    }
+    return curY;
+  }
+
+  // ── Helper: draw a rounded rect ──
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  // ── Build front cover: texture + shadowed text overlay ──
+  function buildFrontComposite(baseTex) {
+    const c = document.createElement("canvas");
+    c.width = TEX_W;
+    c.height = TEX_H;
+    const ctx = c.getContext("2d");
+
+    // Draw the painting texture as background
+    ctx.drawImage(baseTex.image, 0, 0, TEX_W, TEX_H);
+
+    ctx.textAlign = "center";
+
+    // Title with shadow
+    const titleSize = Math.round(TEX_W * 0.065);
+    ctx.font = `700 ${titleSize}px "DM Sans", "Helvetica Neue", sans-serif`;
+    ctx.textBaseline = "top";
+    // Shadow layers (multiple for a soft glow)
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillText(BOOK_TITLE, TEX_W / 2 + 2, TEX_H * 0.08 + 3);
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.fillText(BOOK_TITLE, TEX_W / 2 + 1, TEX_H * 0.08 + 1);
+    // Actual text
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillText(BOOK_TITLE, TEX_W / 2, TEX_H * 0.08);
+
+    // Thin rule
+    const ruleY = TEX_H * 0.08 + titleSize + 14;
+    ctx.strokeStyle = "rgba(255,255,255,0.4)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(TEX_W * 0.3, ruleY);
+    ctx.lineTo(TEX_W * 0.7, ruleY);
+    ctx.stroke();
+
+    // Authors with shadow
+    const authSize = Math.round(TEX_W * 0.026);
+    ctx.font = `400 ${authSize}px "DM Sans", "Helvetica Neue", sans-serif`;
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillText(AUTHORS, TEX_W / 2 + 1, ruleY + 15);
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.fillText(AUTHORS, TEX_W / 2, ruleY + 14);
+
+    // Department at bottom with shadow
+    const deptSize = Math.round(TEX_W * 0.022);
+    ctx.font = `400 ${deptSize}px "DM Sans", "Helvetica Neue", sans-serif`;
+    ctx.textBaseline = "bottom";
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillText(DEPARTMENT, TEX_W / 2 + 1, TEX_H * 0.93 + 1);
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    ctx.fillText(DEPARTMENT, TEX_W / 2, TEX_H * 0.93);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.anisotropy = 8;
+    return tex;
+  }
+
+  // ── Build back cover: texture + review cards ──
+  function buildBackComposite(baseTex) {
+    const c = document.createElement("canvas");
+    c.width = TEX_W;
+    c.height = TEX_H;
+    const ctx = c.getContext("2d");
+
+    // Draw the painting (mirrored) as background
+    ctx.save();
+    ctx.translate(TEX_W, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(baseTex.image, 0, 0, TEX_W, TEX_H);
+    ctx.restore();
+
+    // Darken slightly for readability
+    ctx.fillStyle = "rgba(0, 0, 0, 0.2)";
+    ctx.fillRect(0, 0, TEX_W, TEX_H);
+
+    ctx.textAlign = "center";
+
+    // "Praise for" header in a small pill
+    const headerSize = Math.round(TEX_W * 0.024);
+    const pillW = TEX_W * 0.5;
+    const pillH = TEX_H * 0.04;
+    const pillX = (TEX_W - pillW) / 2;
+    const pillY = TEX_H * 0.05;
+
+    roundRect(ctx, pillX, pillY, pillW, pillH, 6);
+    ctx.fillStyle = "#1B2A4A";
+    ctx.fill();
+
+    ctx.font = `400 ${headerSize}px "DM Sans", "Helvetica Neue", sans-serif`;
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`Praise for ${BOOK_TITLE}`, TEX_W / 2, pillY + pillH / 2);
+
+    // Review cards
+    const reviews = [
+      {
+        quote: "\u201CA masterful exploration of ideas that challenges everything you thought you knew. Essential reading.\u201D",
+        author: "\u2014 The Literary Review",
+      },
+      {
+        quote: "\u201CBrilliantly argued and beautifully written. This book will stay with you long after the final page.\u201D",
+        author: "\u2014 Prof. Jane Smith, Oxford",
+      },
+      {
+        quote: "\u201CProvocative, compelling, and deeply researched. A landmark work in its field.\u201D",
+        author: "\u2014 The Sunday Times",
+      },
+    ];
+
+    const cardPad = 20;
+    const cardX = TEX_W * 0.08;
+    const cardW = TEX_W * 0.84;
+    const quoteSize = Math.round(TEX_W * 0.025);
+    const attrSize = Math.round(TEX_W * 0.019);
+    const maxTextW = cardW - cardPad * 2;
+
+    let yPos = TEX_H * 0.14;
+
+    for (const review of reviews) {
+      // Measure text height first
+      ctx.font = `italic 400 ${quoteSize}px "Source Serif 4", Georgia, serif`;
+      const words = review.quote.split(" ");
+      let line = "";
+      let lines = [];
+      for (const word of words) {
+        const test = line + word + " ";
+        if (ctx.measureText(test).width > maxTextW && line) {
+          lines.push(line.trim());
+          line = word + " ";
+        } else {
+          line = test;
+        }
+      }
+      if (line.trim()) lines.push(line.trim());
+
+      const textH = lines.length * (quoteSize + 5);
+      const cardH = cardPad + textH + 8 + attrSize + cardPad;
+
+      // Draw card background — solid navy
+      roundRect(ctx, cardX, yPos, cardW, cardH, 10);
+      ctx.fillStyle = "#1B2A4A";
+      ctx.fill();
+
+      // Draw quote text
+      ctx.font = `italic 400 ${quoteSize}px "Source Serif 4", Georgia, serif`;
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.textBaseline = "top";
+      let textY = yPos + cardPad;
+      for (const l of lines) {
+        ctx.fillText(l, TEX_W / 2, textY);
+        textY += quoteSize + 5;
+      }
+
+      // Attribution
+      ctx.font = `500 ${attrSize}px "DM Sans", "Helvetica Neue", sans-serif`;
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.fillText(review.author, TEX_W / 2, textY + 6);
+
+      yPos += cardH + 16;
+    }
+
+    // ISBN at bottom
+    const isbnSize = Math.round(TEX_W * 0.017);
+    ctx.font = `400 ${isbnSize}px "DM Sans", monospace`;
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.textBaseline = "bottom";
+    ctx.fillText("ISBN 978-0-000000-00-0", TEX_W / 2, TEX_H * 0.95);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.anisotropy = 8;
+    return tex;
+  }
+
+  // ── Materials ──
   let frontMaterials = $derived.by(() => {
-    const side = new THREE.MeshStandardMaterial({ color: COVER_COLOR, roughness: 0.7 });
-    if (!frontTexture) return [side, side, side, side, side, side];
-    const face = new THREE.MeshStandardMaterial({ map: frontTexture, roughness: 0.55 });
-    return [side, side, side, side, face, side];
+    const edge = new THREE.MeshStandardMaterial({
+      color: EDGE_COLOR,
+      roughness: 0.7,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    if (!frontComposite) return [edge, edge, edge, edge, edge, edge];
+    const face = new THREE.MeshStandardMaterial({
+      map: frontComposite,
+      roughness: 0.45,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    return [edge, edge, edge, edge, face, edge];
   });
 
   let backMaterials = $derived.by(() => {
-    const side = new THREE.MeshStandardMaterial({ color: COVER_COLOR, roughness: 0.7 });
-    if (!backTexture) return [side, side, side, side, side, side];
-    const face = new THREE.MeshStandardMaterial({ map: backTexture, roughness: 0.55 });
-    return [side, side, side, side, side, face];
+    const edge = new THREE.MeshStandardMaterial({
+      color: EDGE_COLOR,
+      roughness: 0.7,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    if (!backComposite) return [edge, edge, edge, edge, edge, edge];
+    const face = new THREE.MeshStandardMaterial({
+      map: backComposite,
+      roughness: 0.45,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    return [edge, edge, edge, edge, edge, face];
+  });
+
+  let spineMaterial = $derived.by(() => {
+    if (!coverTexture) {
+      return new THREE.MeshStandardMaterial({ color: EDGE_COLOR, roughness: 0.7 });
+    }
+    const spineTex = coverTexture.clone();
+    spineTex.wrapS = THREE.ClampToEdgeWrapping;
+    spineTex.wrapT = THREE.ClampToEdgeWrapping;
+    spineTex.repeat.set(0.3, 1);
+    spineTex.offset.set(0.35, 0);
+    spineTex.needsUpdate = true;
+    return new THREE.MeshStandardMaterial({ map: spineTex, roughness: 0.6 });
   });
 
   // ── Wavy page-edge geometry ──
@@ -74,193 +325,25 @@
   const wavyBottom = createWavyPageEdge(W - PAGES_INSET * 2, PAGES_D, "x");
   const wavyFore = createWavyPageEdge(PAGES_D, H - PAGES_INSET * 2, "y");
 
-  // ── Helper: wrap text on canvas ──
-  function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
-    const words = text.split(" ");
-    let line = "";
-    let curY = y;
-    for (const word of words) {
-      const test = line + word + " ";
-      if (ctx.measureText(test).width > maxWidth && line) {
-        ctx.fillText(line.trim(), x, curY);
-        line = word + " ";
-        curY += lineHeight;
-      } else {
-        line = test;
-      }
-    }
-    if (line.trim()) {
-      ctx.fillText(line.trim(), x, curY);
-      curY += lineHeight;
-    }
-    return curY;
-  }
-
-  // ── Build front cover texture ──
-  function buildFrontCover(img) {
-    const c = document.createElement("canvas");
-    c.width = TEX_W;
-    c.height = TEX_H;
-    const ctx = c.getContext("2d");
-
-    // Background
-    ctx.fillStyle = COVER_COLOR;
-    ctx.fillRect(0, 0, TEX_W, TEX_H);
-
-    // Subtle inset border
-    const pad = 40;
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(pad, pad, TEX_W - pad * 2, TEX_H - pad * 2);
-
-    // Title
-    const titleSize = Math.round(TEX_W * 0.065);
-    ctx.font = `700 ${titleSize}px "DM Sans", "Helvetica Neue", sans-serif`;
-    ctx.fillStyle = "#FFFFFF";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    ctx.fillText(BOOK_TITLE, TEX_W / 2, TEX_H * 0.08);
-
-    // Rule under title
-    const ruleY = TEX_H * 0.08 + titleSize + 18;
-    ctx.strokeStyle = "rgba(255,255,255,0.25)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(TEX_W * 0.3, ruleY);
-    ctx.lineTo(TEX_W * 0.7, ruleY);
-    ctx.stroke();
-
-    // Cover image — centered in the middle zone
-    if (img) {
-      const maxImgW = TEX_W * 0.945;
-      const maxImgH = TEX_H * 0.6;
-      const imgAspect = img.width / img.height;
-      let drawW, drawH;
-
-      if (imgAspect > maxImgW / maxImgH) {
-        drawW = maxImgW;
-        drawH = maxImgW / imgAspect;
-      } else {
-        drawH = maxImgH;
-        drawW = maxImgH * imgAspect;
-      }
-
-      const imgX = (TEX_W - drawW) / 2;
-      const imgY = TEX_H * 0.28;
-      ctx.drawImage(img, imgX, imgY, drawW, drawH);
-    }
-
-    // Authors
-    const authSize = Math.round(TEX_W * 0.028);
-    ctx.font = `400 ${authSize}px "DM Sans", "Helvetica Neue", sans-serif`;
-    ctx.fillStyle = "rgba(255,255,255,0.85)";
-    ctx.textBaseline = "bottom";
-    ctx.fillText(AUTHORS, TEX_W / 2, TEX_H * 0.82);
-
-    // Department
-    const deptSize = Math.round(TEX_W * 0.022);
-    ctx.font = `300 ${deptSize}px "DM Sans", "Helvetica Neue", sans-serif`;
-    ctx.fillStyle = "rgba(255,255,255,0.5)";
-    ctx.fillText(DEPARTMENT, TEX_W / 2, TEX_H * 0.92);
-
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    return tex;
-  }
-
-  // ── Build back cover texture — review quotes ──
-  function buildBackCover() {
-    const c = document.createElement("canvas");
-    c.width = TEX_W;
-    c.height = TEX_H;
-    const ctx = c.getContext("2d");
-
-    // Background
-    ctx.fillStyle = COVER_COLOR;
-    ctx.fillRect(0, 0, TEX_W, TEX_H);
-
-    // Border
-    const pad = 40;
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(pad, pad, TEX_W - pad * 2, TEX_H - pad * 2);
-
-    ctx.textAlign = "center";
-
-    // "Praise for" header
-    const headerSize = Math.round(TEX_W * 0.028);
-    ctx.font = `300 ${headerSize}px "DM Sans", "Helvetica Neue", sans-serif`;
-    ctx.fillStyle = "rgba(255,255,255,0.5)";
-    ctx.textBaseline = "top";
-    ctx.fillText(`Praise for ${BOOK_TITLE}`, TEX_W / 2, TEX_H * 0.08);
-
-    // Review quotes
-    const reviews = [
-      {
-        quote: "\u201CA masterful exploration of ideas that challenges everything you thought you knew. Essential reading for our times.\u201D",
-        author: "\u2014 The Literary Review",
-      },
-      {
-        quote: "\u201CBrilliantly argued and beautifully written. This book will stay with you long after the final page.\u201D",
-        author: "\u2014 Prof. Jane Smith, Oxford",
-      },
-      {
-        quote: "\u201CProvocative, compelling, and deeply researched. A landmark work that redefines the conversation.\u201D",
-        author: "\u2014 The Sunday Times",
-      },
-    ];
-
-    let yPos = TEX_H * 0.18;
-    const quoteSize = Math.round(TEX_W * 0.027);
-    const attrSize = Math.round(TEX_W * 0.021);
-    const maxWidth = TEX_W * 0.75;
-
-    for (const review of reviews) {
-      // Quote text (italic serif)
-      ctx.font = `italic 400 ${quoteSize}px "Source Serif 4", Georgia, serif`;
-      ctx.fillStyle = "rgba(255,255,255,0.82)";
-      ctx.textBaseline = "top";
-      yPos = wrapText(ctx, review.quote, TEX_W / 2, yPos, maxWidth, quoteSize + 6);
-
-      // Attribution
-      yPos += 4;
-      ctx.font = `500 ${attrSize}px "DM Sans", "Helvetica Neue", sans-serif`;
-      ctx.fillStyle = "rgba(255,255,255,0.45)";
-      ctx.fillText(review.author, TEX_W / 2, yPos);
-      yPos += attrSize + 35;
-    }
-
-    // ISBN placeholder
-    const isbnSize = Math.round(TEX_W * 0.018);
-    ctx.font = `400 ${isbnSize}px "DM Sans", monospace`;
-    ctx.fillStyle = "rgba(255,255,255,0.25)";
-    ctx.textBaseline = "bottom";
-    ctx.fillText("ISBN 978-0-000000-00-0", TEX_W / 2, TEX_H * 0.94);
-
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    return tex;
-  }
-
-  // ── Load on mount ──
+  // ── Load texture on mount ──
   onMount(() => {
-    backTexture = buildBackCover();
+    const loader = new THREE.TextureLoader();
+    loader.load(coverTextureUrl, (tex) => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.anisotropy = 8;
+      coverTexture = tex;
 
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      frontTexture = buildFrontCover(img);
-    };
-    img.onerror = () => {
-      // No image — text-only front cover
-      frontTexture = buildFrontCover(null);
-    };
-    img.src = coverUrl;
+      // Build composites with text overlays
+      frontComposite = buildFrontComposite(tex);
+      backComposite = buildBackComposite(tex);
+    });
   });
 </script>
 
-<section class="flex flex-col items-center justify-center py-16 md:py-24">
-  <div class="w-[480px] h-[630px] md:w-[600px] md:h-[750px]">
+<section class="flex flex-col items-center justify-center py-16 md:py-10">
+  <div class="w-[360px] h-[470px] md:w-[450px] md:h-[560px]">
     <Canvas>
       <!-- Camera -->
       <T.PerspectiveCamera position={[1.8, 1.2, 2.2]} fov={40} makeDefault>
@@ -275,8 +358,8 @@
       </T.PerspectiveCamera>
 
       <!-- Lighting -->
-      <T.AmbientLight intensity={0.5} />
-      <T.DirectionalLight position={[4, 6, 3]} intensity={1.4} castShadow />
+      <T.AmbientLight intensity={0.6} />
+      <T.DirectionalLight position={[4, 6, 3]} intensity={1.2} castShadow />
       <T.DirectionalLight position={[-2, 3, -1]} intensity={0.3} />
 
       <!-- Book group -->
@@ -293,9 +376,12 @@
         </T.Mesh>
 
         <!-- Spine -->
-        <T.Mesh position={[-(W / 2), 0, 0]}>
-          <T.BoxGeometry args={[COVER, H, SPINE_D]} />
-          <T.MeshStandardMaterial color={SPINE_COLOR} roughness={0.8} />
+        <T.Mesh position={[-(W / 2), 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+          <T.BoxGeometry args={[SPINE_D, H, COVER]} />
+          <T.MeshStandardMaterial
+            map={spineMaterial.map}
+            roughness={0.6}
+          />
         </T.Mesh>
 
         <!-- Page block -->
